@@ -307,6 +307,16 @@ def call_api(payload: Dict[str, str]) -> Dict[str, Any]:
     return response.json()
 
 
+def call_api_with_visible_feedback(payload: Dict[str, str], running_label: str) -> Dict[str, Any]:
+    """
+    Appel API avec indicateur visuel fort (plus visible qu'un simple spinner).
+    """
+    with st.status(running_label, expanded=True) as status:
+        result = call_api(payload)
+        status.update(label="Traitement termine", state="complete", expanded=False)
+    return result
+
+
 def plot_impact_words(impact_words: Dict[str, float], chart_key: str) -> None:
     if not impact_words:
         st.info("Aucune contribution de mot disponible pour ce tweet.")
@@ -427,7 +437,7 @@ def render_prediction_result(payload: Dict[str, str], pred: Dict[str, Any], cont
 
 
 def manual_prediction(default_payload: Dict[str, str]) -> None:
-    st.markdown('<div class="section-box-title"><strong>Analyse manuelle</strong></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-box-title"><strong>📝 Analyse manuelle</strong></div>', unsafe_allow_html=True)
     sync_manual_inputs_with_starter(default_payload)
     with st.form("manual_prediction_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
@@ -444,7 +454,7 @@ def manual_prediction(default_payload: Dict[str, str]) -> None:
     current_payload = {"keyword": keyword, "location": location, "text": text}
     if submit_manual:
         try:
-            pred = call_api(current_payload)
+            pred = call_api_with_visible_feedback(current_payload, "Analyse du tweet en cours...")
             st.session_state["manual_last_payload"] = dict(current_payload)
             st.session_state["manual_last_pred"] = pred
             st.session_state["manual_result_version"] = st.session_state.get("manual_result_version", 0) + 1
@@ -462,7 +472,7 @@ def manual_prediction(default_payload: Dict[str, str]) -> None:
 
 
 def simulate_stream(delay_seconds: float, starter_payload: Dict[str, str]) -> None:
-    st.markdown('<div class="section-box-title"><strong>Simulation de mode en direct</strong></div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-box-title"><strong>📡 Simulation de mode en direct</strong></div>', unsafe_allow_html=True)
     placeholder = st.empty()
     start_live = st.button("Demarrer la simulation", width="stretch", key="live_start_button")
     if start_live:
@@ -477,7 +487,7 @@ def simulate_stream(delay_seconds: float, starter_payload: Dict[str, str]) -> No
             with placeholder.container():
                 st.info(f"Tweet {i}/{len(ordered_tweets)} en cours d'analyse...")
                 try:
-                    pred = call_api(payload)
+                    pred = call_api_with_visible_feedback(payload, "Execution de la simulation en cours...")
                     st.session_state["live_last_payload"] = payload
                     st.session_state["live_last_pred"] = pred
                     render_prediction_result(payload, pred, context_key=f"live_{i}")
@@ -499,7 +509,7 @@ def sidebar_controls() -> Dict[str, Any]:
         with center:
             st.image(str(logo_path), width="stretch")
         st.sidebar.write("")
-    if st.sidebar.button("Deconnexion", width="stretch", key="logout_button"):
+    if st.sidebar.button("🔓 Deconnexion", width="stretch", key="logout_button"):
         st.session_state["is_authenticated"] = False
         st.rerun()
     section_title("icon-config", "Configuration", sidebar=True)
@@ -540,7 +550,7 @@ def main() -> None:
     global API_URL
     API_URL = controls["api_url"]
     render_header()
-    tab_manual, tab_live = st.tabs(["Analyse manuelle", "Simulation de mode en direct"])
+    tab_manual, tab_live = st.tabs(["📝 Analyse manuelle", "📡 Simulation de mode en direct"])
     with tab_manual:
         manual_prediction(controls["starter"])
     with tab_live:
