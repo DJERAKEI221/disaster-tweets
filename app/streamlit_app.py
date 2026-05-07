@@ -1,6 +1,7 @@
 import sys
 import time
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -53,6 +54,24 @@ KNOWN_LOCATION_COORDS = {
     "nairobi": [-1.2864, 36.8172],
     "delhi": [28.6139, 77.2090],
     "berlin": [52.5200, 13.4050],
+}
+LOCAL_IMPACT_WEIGHTS = {
+    "earthquake": 0.22,
+    "flood": 0.2,
+    "wildfire": 0.24,
+    "fire": 0.18,
+    "hurricane": 0.22,
+    "evacuation": 0.18,
+    "disaster": 0.16,
+    "collapsed": 0.14,
+    "injured": 0.14,
+    "dead": 0.2,
+    "tsunami": 0.24,
+    "explosion": 0.22,
+    "rescue": 0.12,
+    "storm": 0.16,
+    "warning": 0.1,
+    "emergency": 0.12,
 }
 
 
@@ -117,6 +136,16 @@ def setup_page() -> None:
             }
             .stButton > button:hover {
                 background: linear-gradient(135deg, #1d4ed8, #0e7490) !important;
+            }
+            div[data-testid="stFormSubmitButton"] > button {
+                background: linear-gradient(135deg, #2563eb, #0891b2) !important;
+                color: #ffffff !important;
+                border: none !important;
+                font-weight: 700 !important;
+            }
+            div[data-testid="stFormSubmitButton"] > button:hover {
+                background: linear-gradient(135deg, #1d4ed8, #0e7490) !important;
+                color: #ffffff !important;
             }
             section[data-testid="stSidebar"] { background:linear-gradient(180deg,#111827 0%,#1f2937 100%); }
             section[data-testid="stSidebar"] * { color:#e5e7eb !important; }
@@ -278,14 +307,42 @@ def call_api(payload: Dict[str, str]) -> Dict[str, Any]:
     return response.json()
 
 
-def plot_impact_words(impact_words: Dict[str, float]) -> None:
+def plot_impact_words(impact_words: Dict[str, float], chart_key: str) -> None:
     if not impact_words:
         st.info("Aucune contribution de mot disponible pour ce tweet.")
         return
     df = pd.DataFrame({"word": list(impact_words.keys()), "impact": list(impact_words.values())}).sort_values("impact", ascending=False)
     fig = px.bar(df, x="word", y="impact", color="impact", color_continuous_scale="Tealrose", title="Influence de chaque mot")
     fig.update_layout(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, width="stretch", key=chart_key)
+
+
+def compute_local_impact_words(payload: Dict[str, str]) -> Dict[str, float]:
+    """
+    Fallback local d'explicabilite quand l'API ne fournit pas impact_words.
+    """
+    raw_text = " ".join(
+        part for part in [payload.get("keyword", ""), payload.get("location", ""), payload.get("text", "")] if part
+    ).lower()
+    tokens = [tok for tok in re.findall(r"[a-zA-Z']+", raw_text) if tok]
+
+    impacts: Dict[str, float] = {}
+    for tok in tokens[:20]:
+        if tok in LOCAL_IMPACT_WEIGHTS:
+            impacts[tok] = max(impacts.get(tok, 0.0), LOCAL_IMPACT_WEIGHTS[tok])
+
+    # Petit fallback: si aucun mot "risque" detecte, on montre les mots principaux neutres.
+    if not impacts:
+        unique_tokens: List[str] = []
+        for tok in tokens:
+            if tok not in unique_tokens and len(tok) > 3:
+                unique_tokens.append(tok)
+            if len(unique_tokens) >= 5:
+                break
+        for tok in unique_tokens:
+            impacts[tok] = 0.02
+
+    return dict(sorted(impacts.items(), key=lambda item: item[1], reverse=True))
 
 
 def plot_map(geo_coords: List[List[float]], map_key: str) -> None:
@@ -307,12 +364,29 @@ def resolve_geo_coords(payload: Dict[str, str], pred: Dict[str, Any]) -> List[Li
     return []
 
 
+def sync_manual_inputs_with_starter(default_payload: Dict[str, str]) -> None:
+    """
+    Synchronise les champs de l'analyse manuelle avec le tweet initial selectionne
+    dans la sidebar pour eviter un affichage fige.
+    """
+    starter_signature = f"{default_payload.get('keyword','')}|{default_payload.get('location','')}|{default_payload.get('text','')}"
+    if st.session_state.get("manual_starter_signature") != starter_signature:
+        st.session_state["manual_starter_signature"] = starter_signature
+        st.session_state["manual_keyword"] = default_payload.get("keyword", "")
+        st.session_state["manual_location"] = default_payload.get("location", "")
+        st.session_state["manual_text"] = default_payload.get("text", "")
+        # Le contexte a change: on efface l'ancien resultat pour forcer une nouvelle analyse.
+        st.session_state.pop("manual_last_payload", None)
+        st.session_state.pop("manual_last_pred", None)
+
+
 def render_prediction_result(payload: Dict[str, str], pred: Dict[str, Any], context_key: str) -> None:
     section_title("icon-kpi", "Resultat de prediction")
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown(f"**Mot-cle**: `{payload.get('keyword', '') or 'N/A'}`")
     st.markdown(f"**Emplacement**: `{payload.get('location', '') or 'N/A'}`")
-    st.markdown(f"**Tweet analyse**: {payload.get('text', '')}")
+    analyzed_text = pred.get("clean_text") or payload.get("text", "")
+    st.markdown(f"**Tweet analyse**: {analyzed_text}")
     c1, c2, c3 = st.columns(3)
     c1.metric("Catastrophe", "Oui" if pred["is_disaster"] else "Non")
     # Compatibilite avec plusieurs schemas d'API:
@@ -328,6 +402,9 @@ def render_prediction_result(payload: Dict[str, str], pred: Dict[str, Any], cont
     resolved_geo_coords = resolve_geo_coords(payload, pred)
     c3.metric("Lieux detectes", f"{len(resolved_geo_coords)}")
     style_metric_cards(border_color="#dbeafe", background_color="#ffffff")
+    impact_words = pred.get("impact_words", {})
+    if not impact_words:
+        impact_words = compute_local_impact_words(payload)
 
     # Infos complementaires renvoyees par certaines APIs (ex: backend Render).
     model_name = pred.get("model_name")
@@ -341,7 +418,7 @@ def render_prediction_result(payload: Dict[str, str], pred: Dict[str, Any], cont
     left, right = st.columns([1.3, 1])
     with left:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        plot_impact_words(pred.get("impact_words", {}))
+        plot_impact_words(impact_words, chart_key=f"impact_chart_{context_key}")
         st.markdown("</div>", unsafe_allow_html=True)
     with right:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -351,41 +428,54 @@ def render_prediction_result(payload: Dict[str, str], pred: Dict[str, Any], cont
 
 def manual_prediction(default_payload: Dict[str, str]) -> None:
     st.markdown('<div class="section-box-title"><strong>Analyse manuelle</strong></div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown('<div class="strong-box-title"><strong>Mot-cle</strong></div>', unsafe_allow_html=True)
-        keyword = st.text_input("Mot-cle", value=default_payload.get("keyword", ""), key="manual_keyword", label_visibility="collapsed")
-    with c2:
-        st.markdown('<div class="strong-box-title"><strong>Emplacement</strong></div>', unsafe_allow_html=True)
-        location = st.text_input("Emplacement", value=default_payload.get("location", ""), key="manual_location", label_visibility="collapsed")
-    st.markdown('<div class="input-box-title"><strong>Entrez un tweet a analyser</strong></div>', unsafe_allow_html=True)
-    text = st.text_area("Entrez un tweet a analyser", value=default_payload.get("text", ""), height=110, key="manual_text", label_visibility="collapsed")
+    sync_manual_inputs_with_starter(default_payload)
+    with st.form("manual_prediction_form", clear_on_submit=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown('<div class="strong-box-title"><strong>Mot-cle</strong></div>', unsafe_allow_html=True)
+            keyword = st.text_input("Mot-cle", key="manual_keyword", label_visibility="collapsed")
+        with c2:
+            st.markdown('<div class="strong-box-title"><strong>Emplacement</strong></div>', unsafe_allow_html=True)
+            location = st.text_input("Emplacement", key="manual_location", label_visibility="collapsed")
+        st.markdown('<div class="input-box-title"><strong>Entrez un tweet a analyser</strong></div>', unsafe_allow_html=True)
+        text = st.text_area("Entrez un tweet a analyser", height=110, key="manual_text", label_visibility="collapsed")
+        submit_manual = st.form_submit_button("Analyser le tweet", width="stretch", type="primary")
+
     current_payload = {"keyword": keyword, "location": location, "text": text}
-    if st.button("Analyser le tweet", width="stretch", type="primary", key="manual_predict_button"):
+    if submit_manual:
         try:
             pred = call_api(current_payload)
-            st.session_state["manual_last_payload"] = current_payload
+            st.session_state["manual_last_payload"] = dict(current_payload)
             st.session_state["manual_last_pred"] = pred
+            st.session_state["manual_result_version"] = st.session_state.get("manual_result_version", 0) + 1
         except Exception as exc:
             st.error(f"Echec appel API: {exc}")
 
-    # Affiche le dernier resultat connu, seulement si le formulaire
-    # correspond encore au tweet analyse (evite l'impression de texte fige).
     if "manual_last_payload" in st.session_state and "manual_last_pred" in st.session_state:
-        if st.session_state["manual_last_payload"] == current_payload:
-            render_prediction_result(st.session_state["manual_last_payload"], st.session_state["manual_last_pred"], context_key="manual")
-        else:
+        render_prediction_result(
+            st.session_state["manual_last_payload"],
+            st.session_state["manual_last_pred"],
+            context_key=f"manual_{st.session_state.get('manual_result_version', 0)}",
+        )
+        if st.session_state["manual_last_payload"] != current_payload:
             st.info("Le texte a change. Clique sur 'Analyser le tweet' pour mettre a jour le resultat.")
 
 
-def simulate_stream(delay_seconds: float) -> None:
+def simulate_stream(delay_seconds: float, starter_payload: Dict[str, str]) -> None:
     st.markdown('<div class="section-box-title"><strong>Simulation de mode en direct</strong></div>', unsafe_allow_html=True)
     placeholder = st.empty()
     start_live = st.button("Demarrer la simulation", width="stretch", key="live_start_button")
     if start_live:
-        for i, payload in enumerate(SIMULATED_TWEETS, start=1):
+        # Le tweet choisi dans la sidebar doit etre traite en premier.
+        if starter_payload in SIMULATED_TWEETS:
+            starter_index = SIMULATED_TWEETS.index(starter_payload)
+        else:
+            starter_index = 0
+        ordered_tweets = SIMULATED_TWEETS[starter_index:] + SIMULATED_TWEETS[:starter_index]
+
+        for i, payload in enumerate(ordered_tweets, start=1):
             with placeholder.container():
-                st.info(f"Tweet {i}/{len(SIMULATED_TWEETS)} en cours d'analyse...")
+                st.info(f"Tweet {i}/{len(ordered_tweets)} en cours d'analyse...")
                 try:
                     pred = call_api(payload)
                     st.session_state["live_last_payload"] = payload
@@ -454,7 +544,7 @@ def main() -> None:
     with tab_manual:
         manual_prediction(controls["starter"])
     with tab_live:
-        simulate_stream(controls["delay"])
+        simulate_stream(controls["delay"], controls["starter"])
 
 
 if __name__ == "__main__":
