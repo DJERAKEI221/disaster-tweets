@@ -19,6 +19,7 @@ import importlib.util
 import subprocess
 # Accès à l'interpréteur Python actuel (pour appeler `python -m pip ...`)
 import sys
+import warnings
 from typing import Iterable, Tuple
 
 
@@ -40,4 +41,15 @@ def ensure_packages(packages: Iterable[Tuple[str, str]]) -> None:
     if not missing:
         return
 
-    subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    except subprocess.CalledProcessError as exc:
+        # Sur certains environnements (ex: Streamlit Cloud), installer à chaud peut échouer.
+        # On évite de bloquer l'app au démarrage; la vraie source de vérité reste requirements.txt.
+        warnings.warn(
+            "Installation automatique des dépendances impossible. "
+            f"Paquets manquants: {missing}. Détail: {exc}. "
+            "Ajoutez-les dans requirements.txt puis redéployez.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
