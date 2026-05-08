@@ -48,6 +48,8 @@ ensure_packages(
         ("pandas", "pandas"),
         ("plotly", "plotly"),
         ("requests", "requests"),
+        ("deep-translator", "deep_translator"),
+        ("langdetect", "langdetect"),
     ]
 )
 
@@ -490,6 +492,48 @@ def call_api_with_visible_feedback(payload: Dict[str, str], running_label: str) 
     return result
 
 
+def translate_preview_if_needed(text: str) -> Dict[str, str]:
+    """
+    Pré-visualise la traduction côté appli :
+    - si le texte est déjà anglais (ou très court), on le garde
+    - sinon on traduit en anglais avant envoi à l'API
+    """
+    out = {"text_for_prediction": text, "detected_lang": "unknown", "translated": "false"}
+    stripped = (text or "").strip()
+    if not stripped:
+        return out
+
+    min_len = int(os.getenv("TRANSLATE_MIN_CHARS", "8"))
+    if len(stripped) < min_len:
+        return out
+
+    try:
+        from langdetect import LangDetectException, detect  # type: ignore[import-untyped]
+
+        try:
+            lang = (detect(stripped) or "").lower()
+        except LangDetectException:
+            return out
+        if not lang:
+            return out
+        out["detected_lang"] = lang
+        if lang in {"en", "eng"}:
+            return out
+    except Exception:
+        return out
+
+    try:
+        from deep_translator import GoogleTranslator  # type: ignore[import-untyped]
+
+        translated = GoogleTranslator(source=out["detected_lang"], target="en").translate(stripped)
+        if isinstance(translated, str) and translated.strip():
+            out["text_for_prediction"] = translated.strip()
+            out["translated"] = "true"
+    except Exception:
+        return out
+    return out
+
+
 def plot_impact_words(impact_words: Dict[str, float], chart_key: str) -> None:
     """Diagramme en barres : chaque mot et son « poids » dans la décision (ou estimation locale)."""
     if not impact_words:
@@ -620,14 +664,29 @@ def manual_prediction() -> None:
     current_payload = {"keyword": keyword, "location": location, "text": text}
     if submit_manual:
         try:
-            pred = call_api_with_visible_feedback(current_payload, "Analyse du tweet en cours...")
-            st.session_state["manual_last_payload"] = dict(current_payload)
+            translation_meta = translate_preview_if_needed(current_payload.get("text", ""))
+            payload_for_api = dict(current_payload)
+            payload_for_api["text"] = translation_meta["text_for_prediction"]
+
+            st.session_state["manual_last_translation"] = translation_meta
+            pred = call_api_with_visible_feedback(payload_for_api, "Analyse du tweet en cours...")
+            st.session_state["manual_last_payload"] = dict(payload_for_api)
             st.session_state["manual_last_pred"] = pred
             st.session_state["manual_result_version"] = st.session_state.get("manual_result_version", 0) + 1
         except Exception as exc:
             st.error(f"Echec appel API: {exc}")
 
     if "manual_last_payload" in st.session_state and "manual_last_pred" in st.session_state:
+        translation_meta = st.session_state.get("manual_last_translation", {})
+        if translation_meta.get("translated") == "true":
+            st.info("Traduction detectee avant prediction")
+            st.caption(f"Langue detectee: `{translation_meta.get('detected_lang', 'unknown')}`")
+            st.text_area(
+                "Texte traduit (envoye au modele)",
+                value=translation_meta.get("text_for_prediction", ""),
+                height=100,
+                key=f"manual_translation_preview_{st.session_state.get('manual_result_version', 0)}",
+            )
         render_prediction_result(
             st.session_state["manual_last_payload"],
             st.session_state["manual_last_pred"],
